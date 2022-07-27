@@ -6,6 +6,7 @@
 (define-data-var avm-state (buff 1) AVM_STATE_HALTED)
 
 (define-constant ERR_INSTR_STACK u1111111111111111111)
+(define-constant ERR_LARGE_TUPLE_ENTRY u222222)
 
 (define-data-var pc uint u0)
 (define-map instr-stack uint { op: (buff 1), nextHash: (buff 32)})
@@ -25,7 +26,7 @@
 ;; avm value types are stored in stacks as clarity serializations
 ;;  avm int => uint
 ;;  avm 'codepoint' => { pcr: uint }
-;;  avm tuple => (list 8 (buff MAX_VALUE_SIZE/8)) ;; v2 todo: I think we can bound this better
+;;  avm tuple => (list 8 (buff MAX_VALUE_SIZE/8 - 6)) ;; v2 todo: I think we can bound this better
 ;;  avm buffer => (buff MAX_VALUE_SIZE - 5)
 
 ;; error handling: do AVM error handling: set codepoint to error handler
@@ -41,13 +42,15 @@
     (begin (var-set avm-state AVM_STATE_HALTED)
            (ok false)))
 
+(define-private (deser-tuple (x (buff 10240)))
+    (ok (unwrap! (from-consensus-buff (list 8 (buff 1274)) x) (err u2))))
 (define-private (deser-int (x (buff 10240)))
     (ok (unwrap! (from-consensus-buff uint x) (err u2))))
 
 (define-private (deser-sint (x (buff 10240)))
     (ok (unwrap! (from-consensus-buff int 
         ;; clarity type cast!
-        (concat 0x00 (slice x u1 (len x))))
+        (concat 0x00 (unwrap-panic (slice x u1 (len x)))))
         (err u2))))
 
 (define-private (deser-codepoint (x (buff 10240)))
@@ -75,13 +78,15 @@
   (let ((tail (var-get data-stack-tail)))
     (var-set data-stack-tail (+ u1 tail))
     (ok (map-set data-stack tail x))))
+(define-private (push-data-stack-tuple (x (list 8 (buff 1274))))
+    (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-buff (x (buff 10235)))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-int (x uint))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-sint (x int))
     (let ((int-ser (unwrap! (to-consensus-buff x) (err u500))))
-         (push-data-stack (concat 0x01 (slice int-ser u1 (len int-ser))))))
+         (push-data-stack (concat 0x01 (unwrap-panic (slice int-ser u1 (len int-ser)))))))
 (define-private (push-aux-stack (x (buff 10240)))
   (let ((tail (var-get aux-stack-tail)))
     (var-set aux-stack-tail (+ u1 tail))
@@ -230,7 +235,7 @@
 
 (define-private (to-buffer (x uint))
     (unwrap-panic (as-max-len?
-        (slice (unwrap-panic (to-consensus-buff x)) u1 u17) u16)))
+        (unwrap-panic (slice (unwrap-panic (to-consensus-buff x)) u1 u17)) u16)))
 
 (define-private (invert-byte (x (buff 1)))
     (unwrap-panic (element-at
@@ -245,7 +250,7 @@
    (push-data-stack
        (concat 0x01 
         (fold concat-len16-buff
-         (unwrap-panic (as-max-len? (map invert-byte (slice a-buff u1 (len a-buff))) u16)) 0x)))))
+         (unwrap-panic (as-max-len? (map invert-byte (unwrap-panic (slice a-buff u1 (len a-buff)))) u16)) 0x)))))
 
 ;; handler for logic opcodes not handled by bin-int, bin-sint (0x14, 0x15, 0x19)
 (define-private (logic (op (buff 1)))
@@ -297,6 +302,39 @@
   (if (is-eq op 0x23) (some (keccakfop))
   (if (is-eq op 0x24) (some (sha256op))
   none))))))
+
+(define-private (tget)
+ (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-data-stack)))
+   (a-int (try! (deser-int a)))
+   (b-tup (try! (deser-tuple b))))
+ ;; push raw serialized value
+ (push-data-stack (unwrap! (element-at b-tup a-int) (err u2)))))
+
+(define-private (tset)
+ (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-data-stack)))
+   (c (try! (pop-data-stack)))
+   (a-int (try! (deser-int a)))
+   (b-tup (try! (deser-tuple b))))
+ (asserts! (< a-int (len b-tup)) (err u2))
+ (push-data-stack-tuple
+  (unwrap-panic (as-max-len? (concat
+    (append (unwrap-panic (slice b-tup u0 a-int))
+            (unwrap! (as-max-len? c u1274) (err ERR_LARGE_TUPLE_ENTRY)))
+    (default-to (list) (slice b-tup (+ a-int u1) (len b-tup))
+   )) u8)))))
+
+(define-private (tuples (op (buff 1)))
+  (if (is-eq op 0x50) (some (tget))
+  (if (is-eq op 0x51) (some (tset))
+  (if (is-eq op 0x52) (some (err u500))
+  (if (is-eq op 0x53) (some (err u500))
+  (if (is-eq op 0x54) (some (err u500))
+  none))))))
+
 
 (define-private (cur-op)
   (get op (map-get? instr-stack (var-get pc))))
