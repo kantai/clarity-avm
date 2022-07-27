@@ -11,13 +11,13 @@
 (define-map instr-stack uint { op: (buff 1), nextHash: (buff 32)})
 (define-data-var instr-stack-tail uint u0)
 
-(define-map data-stack uint (buff 1024))
+(define-map data-stack uint (buff 10240))
 ;; points to the _next_ filled spot, i.e., data-stack[tail] is empty
 (define-data-var data-stack-tail uint u0)
-(define-map aux-stack uint (buff 1024))
+(define-map aux-stack uint (buff 10240))
 ;; points to the _next_ filled spot, i.e., data-stack[tail] is empty
 (define-data-var aux-stack-tail uint u0)
-(define-data-var register (buff 1024) 0x00)
+(define-data-var register (buff 10240) 0x00)
 (define-constant static 0x00)
 (define-data-var avm-gas-remaining uint u0)
 (define-data-var error-codepoint uint u0)
@@ -41,16 +41,16 @@
     (begin (var-set avm-state AVM_STATE_HALTED)
            (ok false)))
 
-(define-private (deser-int (x (buff 1024)))
+(define-private (deser-int (x (buff 10240)))
     (ok (unwrap! (from-consensus-buff uint x) (err u2))))
 
-(define-private (deser-sint (x (buff 1024)))
+(define-private (deser-sint (x (buff 10240)))
     (ok (unwrap! (from-consensus-buff int 
         ;; clarity type cast!
         (concat 0x00 (slice x u1 (len x))))
         (err u2))))
 
-(define-private (deser-codepoint (x (buff 1024)))
+(define-private (deser-codepoint (x (buff 10240)))
     (ok (get pcr (unwrap! (from-consensus-buff { pcr: uint } x) (err u2)))))
 
 (define-private (ser-codepoint (x uint))
@@ -71,18 +71,18 @@
         (map-delete aux-stack (- u1 tail))
         (ok rval))))
 
-(define-private (push-data-stack (x (buff 1024)))
+(define-private (push-data-stack (x (buff 10240)))
   (let ((tail (var-get data-stack-tail)))
     (var-set data-stack-tail (+ u1 tail))
     (ok (map-set data-stack tail x))))
-(define-private (push-data-stack-buff (x (buff 1019)))
+(define-private (push-data-stack-buff (x (buff 10235)))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-int (x uint))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-sint (x int))
     (let ((int-ser (unwrap! (to-consensus-buff x) (err u500))))
          (push-data-stack (concat 0x01 (slice int-ser u1 (len int-ser))))))
-(define-private (push-aux-stack (x (buff 1024)))
+(define-private (push-aux-stack (x (buff 10240)))
   (let ((tail (var-get aux-stack-tail)))
     (var-set aux-stack-tail (+ u1 tail))
     (map-set aux-stack tail x)))
