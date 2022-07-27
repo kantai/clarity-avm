@@ -57,7 +57,7 @@
     (ok (get pcr (unwrap! (from-consensus-buff { pcr: uint } x) (err u2)))))
 
 (define-private (ser-codepoint (x uint))
-    (ok (unwrap! (to-consensus-buff { pcr: x }) (err u500))))
+    (unwrap-panic (to-consensus-buff { pcr: x })))
 
 (define-private (pop-data-stack)
   (let ((tail (var-get data-stack-tail)))
@@ -74,12 +74,20 @@
         (map-delete aux-stack (- u1 tail))
         (ok rval))))
 
+(define-private (push-code-stack (x { op: (buff 1), nextHash: (buff 32)}))
+  (let ((tail (var-get instr-stack-tail)))
+    (var-set instr-stack-tail (+ u1 tail))
+    (map-set instr-stack tail x)
+    tail))
+
 (define-private (push-data-stack (x (buff 10240)))
   (let ((tail (var-get data-stack-tail)))
     (var-set data-stack-tail (+ u1 tail))
     (ok (map-set data-stack tail x))))
 (define-private (push-data-stack-tuple (x (list 8 (buff 1274))))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
+(define-private (push-aux-stack-tuple (x (list 8 (buff 1274))))
+    (push-aux-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-buff (x (buff 10235)))
     (push-data-stack (unwrap! (to-consensus-buff x) (err u500))))
 (define-private (push-data-stack-int (x uint))
@@ -90,7 +98,7 @@
 (define-private (push-aux-stack (x (buff 10240)))
   (let ((tail (var-get aux-stack-tail)))
     (var-set aux-stack-tail (+ u1 tail))
-    (map-set aux-stack tail x)))
+    (ok (map-set aux-stack tail x))))
 
 ;; todo: does the byte opcode push an integer onto the stack or a buffer?
 (define-private (handle-byte (a uint) (b uint))
@@ -179,9 +187,9 @@
       (push-data-stack-int u1)
       (push-data-stack-int u0)))
 (define-private (pcpush)
-  (push-data-stack (try! (ser-codepoint (var-get pc)))))
+  (push-data-stack (ser-codepoint (var-get pc))))
 (define-private (auxpush)
-  (ok (push-aux-stack (try! (pop-data-stack)))))
+  (push-aux-stack (try! (pop-data-stack))))
 (define-private (auxpop)
   (push-data-stack (try! (pop-aux-stack))))
 (define-private (auxstackempty)
@@ -190,7 +198,7 @@
       (push-data-stack-int u0)))
 (define-private (nop) (ok true))
 (define-private (errpush)
-  (push-data-stack (try! (ser-codepoint (var-get error-codepoint)))))
+  (push-data-stack (ser-codepoint (var-get error-codepoint))))
 (define-private (errset)
     (ok (var-set error-codepoint
      (try! (deser-codepoint (try! (pop-data-stack)))))))
@@ -319,23 +327,120 @@
    (c (try! (pop-data-stack)))
    (a-int (try! (deser-int a)))
    (b-tup (try! (deser-tuple b))))
- (asserts! (< a-int (len b-tup)) (err u2))
- (push-data-stack-tuple
-  (unwrap-panic (as-max-len? (concat
-    (append (unwrap-panic (slice b-tup u0 a-int))
-            (unwrap! (as-max-len? c u1274) (err ERR_LARGE_TUPLE_ENTRY)))
-    (default-to (list) (slice b-tup (+ a-int u1) (len b-tup))
-   )) u8)))))
+ (push-data-stack-tuple (try! (tuple-set
+    b-tup a-int c)))))
+
+(define-private (tlen)
+ (let (
+   (a (try! (pop-data-stack)))
+   (a-tup (try! (deser-tuple a))))
+ (push-data-stack-int (len a-tup))))
+
+(define-private (xget)
+ (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-aux-stack)))
+   (a-int (try! (deser-int a)))
+   (b-tup (try! (deser-tuple b))))
+ ;; push raw serialized value
+ (unwrap-panic (push-data-stack (unwrap! (element-at b-tup a-int) (err u2))))
+ (push-aux-stack b)))
+
+(define-private (tuple-set (tup (list 8 (buff 1274)))
+                           (index uint) (value (buff 10240)))
+  (begin
+    (asserts! (< index (len tup)) (err u2))
+    (ok (unwrap-panic (as-max-len?
+      (concat
+         (append (unwrap-panic (slice tup u0 index))
+                 (unwrap! (as-max-len? value u1274) (err ERR_LARGE_TUPLE_ENTRY)))
+         (default-to (list) (slice tup (+ index u1) (len tup))))
+    u8)))))
+
+(define-private (xset)
+ (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-data-stack)))
+   (c (try! (pop-aux-stack)))
+   (a-int (try! (deser-int a)))
+   (c-tup (try! (deser-tuple c))))
+ (push-aux-stack-tuple (try! (tuple-set c-tup a-int b)))))
 
 (define-private (tuples (op (buff 1)))
   (if (is-eq op 0x50) (some (tget))
   (if (is-eq op 0x51) (some (tset))
-  (if (is-eq op 0x52) (some (err u500))
-  (if (is-eq op 0x53) (some (err u500))
-  (if (is-eq op 0x54) (some (err u500))
+  (if (is-eq op 0x52) (some (tlen))
+  (if (is-eq op 0x53) (some (xget))
+  (if (is-eq op 0x54) (some (xset))
   none))))))
 
+(define-private (log)
+  (begin (print { avm-log: (try! (pop-data-stack)) }) (ok true)))
 
+(define-private (setgas)
+  (begin 
+    (var-set avm-gas-remaining (try! (deser-int (try! (pop-data-stack)))))
+    (ok true)))
+
+(define-private (pushgas)
+  (push-data-stack-int (var-get avm-gas-remaining)))
+
+(define-private (sideload)
+  (begin (try! (deser-int (try! (pop-data-stack))))
+         (push-data-stack-tuple (list))))
+
+  ;; The avm spec isn't super clear on the relationship between codepoints,
+  ;;  the instruction stack, and the "pc" (instruction stack pointer).
+  ;; I *think* the pushinsn and pushinsimm operations modify the instruction stack (code)
+  ;; see: https://github.com/OffchainLabs/arbitrum/blob/master/packages/arb-avm-cpp/avm/src/machinestate/machineoperation.cpp#L956
+  ;; which means our implementation should be able to do this as well.
+  ;; However, I'm not sure about how the "nextHash" works here: it seems like avm's state just
+  ;;  decrements the instruction pointer for non-control flow operations, but that won't work
+  ;;  for these new instructions (because they live at the end of the instruction stack): their
+  ;;  "next" instruction *should* be something like `(- b-cp u1)`. We'll need to look more into how they
+  ;;  handle this.
+(define-private (pushinsn)
+  (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-data-stack)))
+   ;; todo: validate that a is opcode?
+   (a-op (unwrap-panic (element-at (unwrap-panic (to-consensus-buff (try! (deser-int a)))) u16)))
+   (b-cp (try! (deser-codepoint b)))
+   (nextHash (unwrap! (get nextHash (map-get? instr-stack b-cp)) (err u2)))
+   (codepoint (push-code-stack { nextHash: nextHash, op: a-op })))
+   (push-data-stack (ser-codepoint codepoint))))
+
+(define-private (pushinsnimm)
+    ;; todo: handling immediates
+  (let (
+   (a (try! (pop-data-stack)))
+   (b (try! (pop-data-stack)))
+   (c (try! (pop-data-stack)))
+   ;; todo: validate that a is opcode?
+   (a-op (unwrap-panic (element-at (unwrap-panic (to-consensus-buff (try! (deser-int a)))) u16)))
+   (c-cp (try! (deser-codepoint c)))
+   (nextHash (unwrap! (get nextHash (map-get? instr-stack c-cp)) (err u2)))
+   (codepoint (push-code-stack { nextHash: nextHash, op: a-op })))
+   (push-data-stack (ser-codepoint codepoint))))
+
+(define-private (system (op (buff 1)))
+  (if (is-eq op 0x60) (some (nop)) ;; breakpoint -> nop
+  (if (is-eq op 0x61) (some (log))
+  (if (is-eq op 0x70) (some (err u500)) ;; todo: unhandled inbox interface
+  (if (is-eq op 0x71) (some (err u500))
+  (if (is-eq op 0x72) (some (err u500))
+  (if (is-eq op 0x73) (some (err u2)) ;; error instr
+  (if (is-eq op 0x74) (some (halt))
+  (if (is-eq op 0x75) (some (setgas))
+  (if (is-eq op 0x76) (some (pushgas))
+  (if (is-eq op 0x77) (some (errpush)) ;; todo: how is errcodepoint different from errpush?
+  (if (is-eq op 0x78) (some (pushinsn))
+  (if (is-eq op 0x79) (some (pushinsnimm))
+  ;; no 0x7a
+  (if (is-eq op 0x7b) (some (sideload))
+    
+  none))))))))))))))
+  
 (define-private (cur-op)
   (get op (map-get? instr-stack (var-get pc))))
 
@@ -345,8 +450,11 @@
         (match (bin-sint op) result result
         (match (arithmetic op) result result
         (match (logic op) result result
-        (match (flow op) result result        
-        (err u404))))))))
+        (match (flow op) result result
+        (match (hashing op) result result
+        (match (tuples op) result result
+        (match (system op) result result
+        (err u404))))))))))
 
 (define-private (run-one)
     (match (step)
