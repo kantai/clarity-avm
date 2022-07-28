@@ -9,7 +9,7 @@
 (define-constant ERR_LARGE_TUPLE_ENTRY u222222)
 
 (define-data-var pc uint u0)
-(define-map instr-stack uint { op: (buff 1), nextHash: (buff 32)})
+(define-map instr-stack uint { op: (buff 1), imv: (optional (buff 10240)), nextHash: (buff 32)})
 (define-data-var instr-stack-tail uint u0)
 
 (define-map data-stack uint (buff 10240))
@@ -36,10 +36,12 @@
     (if (is-eq (var-get error-codepoint) u0)
         (var-set avm-state AVM_STATE_EXTENSIVE)
         (var-set pc (var-get error-codepoint)))
+    (print { message: "AVM halted with error" })
     (ok false)))
 
 (define-private (halt)
     (begin (var-set avm-state AVM_STATE_HALTED)
+           (print { message: "AVM halted" })
            (ok false)))
 
 (define-private (deser-tuple (x (buff 10240)))
@@ -61,20 +63,22 @@
 
 (define-private (pop-data-stack)
   (let ((tail (var-get data-stack-tail)))
-    (asserts! (< u0 tail) (err u0))
-    (var-set data-stack-tail (- u1 tail))
-    (let ((rval (unwrap! (map-get? data-stack (- u1 tail)) (err u1))))
-        (map-delete data-stack (- u1 tail))
+    (asserts! (>= tail u1) (err u0))
+    (var-set data-stack-tail (- tail u1))
+    (let ((rval (unwrap! (map-get? data-stack (- tail u1)) (err u1))))
+        (map-delete data-stack (- tail u1))
         (ok rval))))
+
+
 (define-private (pop-aux-stack)
   (let ((tail (var-get aux-stack-tail)))
     (asserts! (< u0 tail) (err u0))
-    (var-set aux-stack-tail (- u1 tail))
-    (let ((rval (unwrap! (map-get? aux-stack (- u1 tail)) (err u1))))
-        (map-delete aux-stack (- u1 tail))
+    (var-set aux-stack-tail (- tail u1))
+    (let ((rval (unwrap! (map-get? aux-stack (- tail u1)) (err u1))))
+        (map-delete aux-stack (- tail u1))
         (ok rval))))
 
-(define-private (push-code-stack (x { op: (buff 1), nextHash: (buff 32)}))
+(define-private (push-code-stack (x {op: (buff 1), imv: (optional (buff 10240)), nextHash: (buff 32)}))
   (let ((tail (var-get instr-stack-tail)))
     (var-set instr-stack-tail (+ u1 tail))
     (map-set instr-stack tail x)
@@ -245,7 +249,7 @@
     (unwrap-panic (as-max-len?
         (unwrap-panic (slice (unwrap-panic (to-consensus-buff x)) u1 u17)) u16)))
 
-(define-private (invert-byte (x (buff 1)))
+(define-read-only (invert-byte (x (buff 1)))
     (unwrap-panic (element-at
         (to-buffer (xor (buff-to-uint-be 0xff) (buff-to-uint-be x))) u15)))
 
@@ -407,7 +411,7 @@
    (a-op (unwrap-panic (element-at (unwrap-panic (to-consensus-buff (try! (deser-int a)))) u16)))
    (b-cp (try! (deser-codepoint b)))
    (nextHash (unwrap! (get nextHash (map-get? instr-stack b-cp)) (err u2)))
-   (codepoint (push-code-stack { nextHash: nextHash, op: a-op })))
+   (codepoint (push-code-stack { nextHash: nextHash, op: a-op, imv: none })))
    (push-data-stack (ser-codepoint codepoint))))
 
 (define-private (pushinsnimm)
@@ -420,10 +424,19 @@
    (a-op (unwrap-panic (element-at (unwrap-panic (to-consensus-buff (try! (deser-int a)))) u16)))
    (c-cp (try! (deser-codepoint c)))
    (nextHash (unwrap! (get nextHash (map-get? instr-stack c-cp)) (err u2)))
-   (codepoint (push-code-stack { nextHash: nextHash, op: a-op })))
+   (codepoint (push-code-stack { nextHash: nextHash, op: a-op, imv: none })))
    (push-data-stack (ser-codepoint codepoint))))
 
+(define-private (dup1)
+  (let ((a (try! (pop-data-stack)))
+        (b (try! (pop-data-stack))))
+    (unwrap-panic (push-data-stack b))
+    (unwrap-panic (push-data-stack a))
+    (push-data-stack b)
+  ))
+
 (define-private (system (op (buff 1)))
+  (if (is-eq op 0x41) (some (dup1))
   (if (is-eq op 0x60) (some (nop)) ;; breakpoint -> nop
   (if (is-eq op 0x61) (some (log))
   (if (is-eq op 0x70) (some (err u500)) ;; todo: unhandled inbox interface
@@ -439,13 +452,21 @@
   ;; no 0x7a
   (if (is-eq op 0x7b) (some (sideload))
     
-  none))))))))))))))
+  none)))))))))))))))
   
 (define-private (cur-op)
-  (get op (map-get? instr-stack (var-get pc))))
+  (begin
+    (print { op: (get op (map-get? instr-stack (var-get pc))), data-stack-tail: (var-get data-stack-tail)})
+    (get op (map-get? instr-stack (var-get pc)))))
+
+(define-private (handle-imv)
+  (match (get imv (unwrap! (map-get? instr-stack (var-get pc)) (err ERR_INSTR_STACK)))
+    imv (push-data-stack imv)
+    (ok true)))
 
 (define-private (step)
     (let ((op (unwrap! (cur-op) (err ERR_INSTR_STACK))))
+        (try! (handle-imv))
         (match (bin-uint op) result result
         (match (bin-sint op) result result
         (match (arithmetic op) result result
@@ -454,15 +475,45 @@
         (match (hashing op) result result
         (match (tuples op) result result
         (match (system op) result result
-        (err u404))))))))))
+        (err u404)))))))))))
 
-(define-private (run-one)
-    (match (step)
-    ;; op handled ok, determine next pc value
-    pop-instr?
-    (if pop-instr?
+(define-public (run-one)
+  (if (not (is-eq (var-get avm-state) AVM_STATE_EXTENSIVE))
+      (ok false)
+      (match (step)
+      ;; op handled ok, determine next pc value
+      pop-instr?
+      (if pop-instr?
         (let ((cur-pc (var-get pc)))
             (if (is-eq cur-pc u0) (halt) (ok (var-set pc (- cur-pc u1)))))
         (ok true))
-    ;; op errored, run error handler
-    error-code (handle-error)))
+      ;; op errored, run error handler
+      error-code (handle-error))))
+
+;; returns (ok false) if halted / stopped before running ten
+;; returns (ok true) if there's more to execute
+(define-public (run-ten)
+  (begin
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (asserts! (unwrap-panic (run-one)) (ok false))
+    (ok true)))
+
+(define-private (push-instruction (x { op: (buff 1),  imv: (optional (buff 10240)) }))
+  (push-code-stack { op: (get op x), nextHash: 0x00, imv: (get imv x) }))
+
+;; instructions will be evaluated in "reverse" order, because the instruction stack
+;; is evaluated top to bottom. this is an easy fix during initialization!
+(define-public (initialize-vm (instructions (list 100 { op: (buff 1), imv: (optional (buff 10240)) })))
+  (begin
+    (map push-instruction instructions)
+    (var-set pc (- (var-get instr-stack-tail) u1))
+    (var-set avm-state AVM_STATE_EXTENSIVE)
+    (ok true)))
