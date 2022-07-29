@@ -435,8 +435,18 @@
     (push-data-stack b)
   ))
 
+(define-private (swap2)
+  (let ((a (try! (pop-data-stack)))
+        (b (try! (pop-data-stack)))
+        (c (try! (pop-data-stack))))
+    (unwrap-panic (push-data-stack a))
+    (unwrap-panic (push-data-stack b))
+    (push-data-stack c)
+  ))
+
 (define-private (system (op (buff 1)))
   (if (is-eq op 0x41) (some (dup1))
+  (if (is-eq op 0x44) (some (swap2))
   (if (is-eq op 0x60) (some (nop)) ;; breakpoint -> nop
   (if (is-eq op 0x61) (some (log))
   (if (is-eq op 0x70) (some (err u500)) ;; todo: unhandled inbox interface
@@ -452,7 +462,7 @@
   ;; no 0x7a
   (if (is-eq op 0x7b) (some (sideload))
     
-  none)))))))))))))))
+  none))))))))))))))))
   
 (define-private (cur-op)
   (begin
@@ -504,6 +514,20 @@
     (asserts! (unwrap-panic (run-one)) (ok false))
     (asserts! (unwrap-panic (run-one)) (ok false))
     (asserts! (unwrap-panic (run-one)) (ok false))
+    (ok true)))
+
+(define-public (run-100)
+  (begin
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
+    (asserts! (unwrap-panic (run-ten)) (ok false))
     (ok true)))
 
 (define-private (push-instruction (x { op: (buff 1),  imv: (optional (buff 10240)) }))
